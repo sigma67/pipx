@@ -255,6 +255,8 @@ def run_pipx_command(args: argparse.Namespace) -> ExitCode:  # noqa: C901
         return commands.list_packages(
             venv_container, args.include_injected, args.json, args.short
         )
+    elif args.command == "show":
+        return commands.show(venv_dir, args.package)
     elif args.command == "uninstall":
         return commands.uninstall(venv_dir, constants.LOCAL_BIN_DIR, verbose)
     elif args.command == "uninstall-all":
@@ -555,6 +557,18 @@ def _add_list(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--verbose", action="store_true")
 
 
+def _add_show(subparsers: argparse._SubParsersAction, venv_completer: VenvCompleter) -> None:
+    p = subparsers.add_parser(
+        "show",
+        help="Show an installed package",
+        description="Show information about an app installed with pipx",
+    )
+    p.add_argument(
+        "package",
+        help="Name of the existing pipx-managed Virtual Environment to show information for",
+    ).completer = venv_completer
+
+
 def _add_run(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
         "run",
@@ -712,6 +726,7 @@ def get_command_parser() -> argparse.ArgumentParser:
     _add_reinstall(subparsers, completer_venvs.use)
     _add_reinstall_all(subparsers)
     _add_list(subparsers)
+    _add_show(subparsers, completer_venvs.use)
     _add_run(subparsers)
     _add_runpip(subparsers, completer_venvs.use)
     _add_ensurepath(subparsers)
