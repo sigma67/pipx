@@ -1,6 +1,8 @@
 import datetime
 import hashlib
 import logging
+import re
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -23,6 +25,11 @@ from pipx.util import (
     run_pypackage_bin,
 )
 from pipx.venv import Venv
+
+if sys.version_info < (3, 11):
+    import tomli as tomllib
+else:
+    import tomllib
 
 logger = logging.getLogger(__name__)
 
@@ -125,9 +132,7 @@ def run_package(
 
     pypackage_bin_path = get_pypackage_bin_path(app)
     if pypackage_bin_path.exists():
-        logger.info(
-            f"Using app in local __pypackages__ directory at '{pypackage_bin_path}'"
-        )
+        logger.info(f"Using app in local __pypackages__ directory at '{pypackage_bin_path}'")
         run_pypackage_bin(pypackage_bin_path, app_args)
     if pypackages:
         raise PipxError(
@@ -218,15 +223,15 @@ def _download_and_run(
     verbose: bool,
 ) -> NoReturn:
     venv = Venv(venv_dir, python=python, verbose=verbose)
-    venv.create_venv(venv_args, pip_args)
 
     if venv.pipx_metadata.main_package.package is not None:
         package_name = venv.pipx_metadata.main_package.package
     else:
-        package_name = package_name_from_spec(
-            package_or_url, python, pip_args=pip_args, verbose=verbose
-        )
+        package_name = package_name_from_spec(package_or_url, python, pip_args=pip_args, verbose=verbose)
 
+    override_shared = package_name == "pip"
+
+    venv.create_venv(venv_args, pip_args, override_shared)
     venv.install_package(
         package_name=package_name,
         package_or_url=package_or_url,
@@ -249,10 +254,7 @@ def _download_and_run(
             else:
                 app_filename = app
         else:
-            all_apps = (
-                f"{a} - usage: 'pipx run --spec {package_or_url} {a} [arguments?]'"
-                for a in apps
-            )
+            all_apps = (f"{a} - usage: 'pipx run --spec {package_or_url} {a} [arguments?]'" for a in apps)
             raise PipxError(
                 APP_NOT_FOUND_ERROR_MESSAGE.format(
                     app=app,
@@ -269,9 +271,7 @@ def _download_and_run(
     venv.run_app(app, app_filename, app_args)
 
 
-def _get_temporary_venv_path(
-    requirements: List[str], python: str, pip_args: List[str], venv_args: List[str]
-) -> Path:
+def _get_temporary_venv_path(requirements: List[str], python: str, pip_args: List[str], venv_args: List[str]) -> Path:
     """Computes deterministic path using hashing function on arguments relevant
     to virtual environment's end state. Arguments used should result in idempotent
     virtual environment. (i.e. args passed to app aren't relevant, but args
@@ -319,41 +319,43 @@ def _http_get_request(url: str) -> str:
         raise PipxError(str(e)) from e
 
 
-def _get_requirements_from_script(content: str) -> Optional[List[str]]:
-    # An iterator over the lines in the script. We will
-    # read through this in sections, so it needs to be an
-    # iterator, not just a list.
-    lines = iter(content.splitlines())
+# This regex comes from the inline script metadata spec
+INLINE_SCRIPT_METADATA = re.compile(r"(?m)^# /// (?P<type>[a-zA-Z0-9-]+)$\s(?P<content>(^#(| .*)$\s)+)^# ///$")
 
-    for line in lines:
-        if not line.startswith("#"):
-            continue
-        line_content = line[1:].strip()
-        if line_content == "Requirements:":
-            break
-    else:
-        # No "Requirements:" line in the file
+
+def _get_requirements_from_script(content: str) -> Optional[List[str]]:
+    """
+    Supports inline script metadata.
+    """
+
+    name = "pyproject"
+
+    # Windows is currently getting un-normalized line endings, so normalize
+    content = content.replace("\r\n", "\n")
+
+    matches = [m for m in INLINE_SCRIPT_METADATA.finditer(content) if m.group("type") == name]
+
+    if not matches:
         return None
 
-    # We are now at the first requirement
-    requirements = []
-    for line in lines:
-        # Stop at the end of the comment block
-        if not line.startswith("#"):
-            break
-        line_content = line[1:].strip()
-        # Stop at a blank comment line
-        if not line_content:
-            break
+    if len(matches) > 1:
+        raise ValueError(f"Multiple {name} blocks found")
 
+    content = "".join(
+        line[2:] if line.startswith("# ") else line[1:] for line in matches[0].group("content").splitlines(keepends=True)
+    )
+
+    pyproject = tomllib.loads(content)
+
+    requirements = []
+    for requirement in pyproject.get("run", {}).get("requirements", []):
         # Validate the requirement
         try:
-            req = Requirement(line_content)
+            req = Requirement(requirement)
         except InvalidRequirement as e:
-            raise PipxError(f"Invalid requirement {line_content}: {str(e)}") from e
+            raise PipxError(f"Invalid requirement {requirement}: {e}") from e
 
-        # Use the normalised form of the requirement,
-        # not the original line.
+        # Use the normalised form of the requirement
         requirements.append(str(req))
 
     return requirements
